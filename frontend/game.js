@@ -33,6 +33,7 @@ let myReady = false;
 let level = null;
 let won = false;
 let spectating = false;
+let inGame = false;
 
 /** @type {Map<string, RemotePlayer>} */
 const remotePlayers = new Map();
@@ -118,6 +119,7 @@ function showConnectionLost(message) {
   statusEl.textContent = message;
   level = null;
   won = false;
+  inGame = false;
   remotePlayers.clear();
 }
 
@@ -138,6 +140,13 @@ function handleMessage(msg) {
       spectating = msg.spectating;
       const me_ = msg.players.find(p => p.id === myId);
       if (me_) { myColor = me_.color; myReady = me_.ready; }
+
+      // Сервер шлёт lobby-снимок и зрителям в очереди, и активным игрокам
+      // (например, сразу после "start" — чтобы зрители увидели смену
+      // состояния). Если мы уже в игре, этот снимок не должен возвращать
+      // нас в комнату ожидания — раньше именно так "съедало" старт раунда.
+      if (inGame && msg.state !== "waiting") break;
+      inGame = false;
       showWaitingRoom(msg);
       break;
 
@@ -161,6 +170,7 @@ function handleMessage(msg) {
       }
       won = false;
       hintText = "";
+      inGame = true;
       startGame();
       break;
 
@@ -385,6 +395,7 @@ function render(now) {
   canvas.style.filter = `hue-rotate(${hueDeg}deg) saturate(1.6) contrast(1.08)`;
 
   const camX = clamp(me.x - canvas.width / 2, 0, Math.max(0, level.width - canvas.width));
+  const camY = clamp(me.y - canvas.height / 2, 0, Math.max(0, level.height - canvas.height));
 
   let shakeX = 0, shakeY = 0;
   if (now < shakeUntil) {
@@ -395,7 +406,7 @@ function render(now) {
   drawPsychedelicBackdrop(now, camX);
 
   ctx.save();
-  ctx.translate(-camX + shakeX, shakeY);
+  ctx.translate(-camX + shakeX, -camY + shakeY);
 
   for (const pf of level.platforms) {
     const hue = (now / 9 + pf.x * 0.06) % 360;
