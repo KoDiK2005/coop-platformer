@@ -57,10 +57,31 @@ let hintUntil = 0;
 const confetti = [];
 
 // ---------- звук (синтез через WebAudio, без файлов) ----------
+const muteBtn = document.getElementById("muteBtn");
 let audioCtx = null;
+let masterGain = null;
+let muted = localStorage.getItem("platformer_muted") === "1";
+
+function ensureAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  masterGain = audioCtx.createGain();
+  masterGain.gain.value = muted ? 0 : 1;
+  masterGain.connect(audioCtx.destination);
+}
+
+function setMuted(v) {
+  muted = v;
+  localStorage.setItem("platformer_muted", v ? "1" : "0");
+  if (masterGain) masterGain.gain.value = v ? 0 : 1;
+  muteBtn.textContent = v ? "🔇" : "🔊";
+}
+setMuted(muted);
+muteBtn.addEventListener("click", () => setMuted(!muted));
+
 function sfx(freqStart, freqEnd, durationMs, type = "sine", volume = 0.15) {
   try {
-    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    ensureAudio();
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
     osc.type = type;
@@ -68,16 +89,64 @@ function sfx(freqStart, freqEnd, durationMs, type = "sine", volume = 0.15) {
     osc.frequency.exponentialRampToValueAtTime(Math.max(freqEnd, 1), audioCtx.currentTime + durationMs / 1000);
     gain.gain.setValueAtTime(volume, audioCtx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + durationMs / 1000);
-    osc.connect(gain).connect(audioCtx.destination);
+    osc.connect(gain).connect(masterGain);
     osc.start();
     osc.stop(audioCtx.currentTime + durationMs / 1000);
   } catch (e) { /* звук не критичен для игры */ }
 }
+
 function playJumpSound() { sfx(420, 720, 140, "square", 0.08); }
 function playWinSound() {
   sfx(440, 880, 180, "sine", 0.12);
   setTimeout(() => sfx(660, 1100, 220, "sine", 0.12), 140);
   setTimeout(() => sfx(880, 1320, 300, "sine", 0.12), 300);
+}
+function playLandSound(hard) {
+  if (hard) sfx(160, 60, 160, "triangle", 0.12);
+  else sfx(220, 120, 70, "triangle", 0.05);
+}
+function playFallSound() { sfx(380, 80, 350, "sawtooth", 0.07); }
+function playFootstepSound() { sfx(140 + Math.random() * 40, 90, 45, "square", 0.035); }
+function playHintDing() { sfx(900, 1400, 160, "sine", 0.07); }
+function playClickSound() { sfx(700, 500, 60, "square", 0.05); }
+
+// ---------- фоновый эмбиент-дрон во время раунда ----------
+let ambient = null;
+function startAmbient() {
+  ensureAudio();
+  if (ambient) return;
+  const gain = audioCtx.createGain();
+  gain.gain.value = 0;
+  gain.connect(masterGain);
+  gain.gain.linearRampToValueAtTime(0.05, audioCtx.currentTime + 1.5);
+
+  const nodes = [];
+  for (const freq of [98, 147, 196]) {
+    const osc = audioCtx.createOscillator();
+    osc.type = "sine";
+    osc.frequency.value = freq;
+
+    const lfo = audioCtx.createOscillator();
+    lfo.frequency.value = 0.05 + Math.random() * 0.08;
+    const lfoGain = audioCtx.createGain();
+    lfoGain.gain.value = 2.5;
+    lfo.connect(lfoGain).connect(osc.frequency);
+
+    osc.connect(gain);
+    osc.start();
+    lfo.start();
+    nodes.push(osc, lfo);
+  }
+  ambient = { gain, nodes };
+}
+function stopAmbient() {
+  if (!ambient) return;
+  const { gain, nodes } = ambient;
+  const now = audioCtx.currentTime;
+  gain.gain.cancelScheduledValues(now);
+  gain.gain.setTargetAtTime(0, now, 0.25);
+  setTimeout(() => nodes.forEach((n) => { try { n.stop(); } catch (e) {} }), 800);
+  ambient = null;
 }
 
 // ---------- лобби ----------
@@ -86,6 +155,7 @@ nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") join(); })
 readyBtn.addEventListener("click", toggleReady);
 
 function join() {
+  playClickSound();
   const name = (nameInput.value || "Игрок").trim().slice(0, 16) || "Игрок";
   myName = name;
   connect(name);
@@ -124,9 +194,11 @@ function showConnectionLost(message) {
   won = false;
   inGame = false;
   remotePlayers.clear();
+  stopAmbient();
 }
 
 function toggleReady() {
+  playClickSound();
   send({ type: "ready" });
 }
 
@@ -177,6 +249,7 @@ function handleMessage(msg) {
       lastCheckpoint = { x: level.start.x, y: level.start.y };
       lastCheckpointKey = null;
       startGame();
+      startAmbient();
       break;
 
     case "move":
@@ -193,6 +266,7 @@ function handleMessage(msg) {
     case "hint":
       hintText = msg.text;
       hintUntil = performance.now() + 7000;
+      playHintDing();
       break;
 
     case "win":
@@ -200,6 +274,7 @@ function handleMessage(msg) {
       playWinSound();
       spawnConfetti();
       triggerShake(22, 700);
+      stopAmbient();
       break;
   }
 }
@@ -227,6 +302,7 @@ function showWaitingRoom(msg) {
   canvas.style.filter = "none";
   hud.style.display = "none";
   waitingRoom.style.display = "block";
+  stopAmbient();
 
   playerListEl.innerHTML = "";
   for (const p of msg.players) {
@@ -290,6 +366,7 @@ function startGame() {
 let lastTime = performance.now();
 let lastSend = 0;
 let walkPhase = 0;
+let lastFootstepTime = 0;
 
 function loop(now) {
   const dt = Math.min((now - lastTime) / 1000, 0.05);
@@ -338,8 +415,16 @@ function update(dt) {
     }
   }
 
-  if (!wasOnGround && me.onGround && fallSpeed > 900) {
-    triggerShake(6, 150);
+  if (!wasOnGround && me.onGround) {
+    const hard = fallSpeed > 900;
+    playLandSound(hard);
+    if (hard) triggerShake(6, 150);
+  }
+
+  const nowMs = performance.now();
+  if (me.onGround && me.vx !== 0 && nowMs - lastFootstepTime > 150) {
+    lastFootstepTime = nowMs;
+    playFootstepSound();
   }
 
   if (me.y > level.height + 200) {
@@ -349,6 +434,7 @@ function update(dt) {
     me.vy = 0;
     fell = true;
     triggerShake(10, 200);
+    playFallSound();
   }
 
   if (me.x < 0) me.x = 0;
