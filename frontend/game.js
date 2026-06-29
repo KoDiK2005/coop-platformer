@@ -11,8 +11,12 @@ const statusEl = document.getElementById("status");
 const hud = document.getElementById("hud");
 const playerListEl = document.getElementById("playerList");
 const readyBtn = document.getElementById("readyBtn");
+const lobbyHintEl = document.getElementById("lobbyHint");
 const countdownTextEl = document.getElementById("countdownText");
 const spectatorNoticeEl = document.getElementById("spectatorNotice");
+
+const MIN_PLAYERS_TO_START = 2;
+const countdownColors = ["#ff5d5d", "#ffd25d", "#5dff8a", "#5da9ff", "#ff5dee"];
 
 const GRAVITY = 1800;
 const MOVE_SPEED = 320;
@@ -38,6 +42,7 @@ const me = {
   onGround: true,
   facing: 1,
   atFinish: false,
+  trail: [],
 };
 
 const keys = { left: false, right: false, jump: false };
@@ -113,7 +118,11 @@ function handleMessage(msg) {
       break;
 
     case "countdown":
-      countdownTextEl.textContent = msg.seconds > 0 ? `Старт через ${msg.seconds}...` : "";
+      if (msg.seconds > 0) showCountdownNumber(msg.seconds);
+      else {
+        countdownTextEl.textContent = "";
+        countdownTextEl.classList.remove("pop");
+      }
       break;
 
     case "start":
@@ -151,20 +160,32 @@ function handleMessage(msg) {
       won = true;
       playWinSound();
       spawnConfetti();
+      triggerShake(22, 700);
       break;
   }
+}
+
+function showCountdownNumber(n) {
+  countdownTextEl.textContent = n;
+  countdownTextEl.style.color = countdownColors[n % countdownColors.length];
+  countdownTextEl.classList.remove("pop");
+  void countdownTextEl.offsetWidth; // форсируем перезапуск CSS-анимации
+  countdownTextEl.classList.add("pop");
+  sfx(260 + n * 70, 200, 160, "triangle", 0.1);
 }
 
 function toRemote(p) {
   return {
     x: p.x, y: p.y, vx: 0, vy: 0, onGround: true, facing: 1,
     color: p.color || "#999", name: p.name || "Игрок", atFinish: !!p.atFinish,
+    trail: [],
   };
 }
 
 function showWaitingRoom(msg) {
   nameScreen.style.display = "none";
   canvas.style.display = "none";
+  canvas.style.filter = "none";
   hud.style.display = "none";
   waitingRoom.style.display = "block";
 
@@ -194,6 +215,19 @@ function showWaitingRoom(msg) {
   readyBtn.textContent = myReady ? "Готов ✓" : "Готов";
   readyBtn.style.display = spectating ? "none" : "inline-block";
   spectatorNoticeEl.style.display = spectating ? "block" : "none";
+
+  lobbyHintEl.textContent = spectating ? "" : computeLobbyHint(msg.players);
+}
+
+function computeLobbyHint(players) {
+  if (players.length < MIN_PLAYERS_TO_START) {
+    return `Нужно минимум ${MIN_PLAYERS_TO_START} игрока, чтобы начать (сейчас ${players.length})`;
+  }
+  const readyCount = players.filter(p => p.ready).length;
+  if (readyCount < players.length) {
+    return `Готовы ${readyCount}/${players.length} — нажмите «Готов»`;
+  }
+  return "Все готовы — старт!";
 }
 
 // ---------- управление ----------
@@ -246,11 +280,17 @@ function update(dt) {
 
   if (me.vx !== 0) walkPhase += dt * 10;
 
+  const wasOnGround = me.onGround;
+  const fallSpeed = me.vy;
   me.onGround = false;
   let fell = false;
 
   for (const pf of level.platforms) {
     if (resolveCollision(pf)) me.onGround = true;
+  }
+
+  if (!wasOnGround && me.onGround && fallSpeed > 900) {
+    triggerShake(6, 150);
   }
 
   if (me.y > level.height + 200) {
@@ -259,6 +299,7 @@ function update(dt) {
     me.vx = 0;
     me.vy = 0;
     fell = true;
+    triggerShake(10, 200);
   }
 
   if (me.x < 0) me.x = 0;
@@ -302,36 +343,55 @@ function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
-// ---------- рендер ----------
+// ---------- рендер (максимально психоделический) ----------
+let shakeUntil = 0;
+let shakeMag = 0;
+
+function triggerShake(magnitude, durationMs) {
+  shakeMag = magnitude;
+  shakeUntil = performance.now() + durationMs;
+}
+
 function render(now) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!level) return;
 
+  // непрерывный сдвиг оттенка всей картинки — главный "наркоманский" эффект
+  const hueDeg = (now / 18) % 360;
+  canvas.style.filter = `hue-rotate(${hueDeg}deg) saturate(1.6) contrast(1.08)`;
+
   const camX = clamp(me.x - canvas.width / 2, 0, Math.max(0, level.width - canvas.width));
 
-  drawBackground(camX);
-
-  ctx.save();
-  ctx.translate(-camX, 0);
-
-  ctx.fillStyle = "#4a5578";
-  for (const pf of level.platforms) {
-    ctx.fillRect(pf.x, pf.y, pf.w, pf.h);
-    ctx.fillStyle = "#5c6896";
-    ctx.fillRect(pf.x, pf.y, pf.w, 4);
-    ctx.fillStyle = "#4a5578";
+  let shakeX = 0, shakeY = 0;
+  if (now < shakeUntil) {
+    shakeX = (Math.random() - 0.5) * shakeMag;
+    shakeY = (Math.random() - 0.5) * shakeMag;
   }
 
-  const f = level.finish;
-  ctx.fillStyle = "#bfae7a";
-  ctx.fillRect(f.x + f.w / 2 - 3, f.y - 60, 6, 60);
-  ctx.fillStyle = "#5dff8a";
-  ctx.beginPath();
-  ctx.moveTo(f.x + f.w / 2 + 3, f.y - 60);
-  ctx.lineTo(f.x + f.w / 2 + 34, f.y - 50);
-  ctx.lineTo(f.x + f.w / 2 + 3, f.y - 40);
-  ctx.closePath();
-  ctx.fill();
+  drawPsychedelicBackdrop(now, camX);
+
+  ctx.save();
+  ctx.translate(-camX + shakeX, shakeY);
+
+  for (const pf of level.platforms) {
+    const hue = (now / 9 + pf.x * 0.06) % 360;
+    ctx.save();
+    ctx.shadowColor = `hsl(${hue}, 100%, 60%)`;
+    ctx.shadowBlur = 16;
+    ctx.fillStyle = `hsl(${hue}, 75%, 38%)`;
+    ctx.fillRect(pf.x, pf.y, pf.w, pf.h);
+    ctx.fillStyle = `hsl(${hue}, 100%, 72%)`;
+    ctx.fillRect(pf.x, pf.y, pf.w, 4);
+    ctx.restore();
+  }
+
+  drawRainbowFinish(level.finish, now);
+
+  pushTrail(me.trail, me.x, me.y, now);
+  for (const [, rp] of remotePlayers) pushTrail(rp.trail, rp.x, rp.y, now);
+
+  for (const [, rp] of remotePlayers) drawTrail(rp.trail, now);
+  drawTrail(me.trail, now);
 
   for (const [, rp] of remotePlayers) {
     drawHuman(rp.x, rp.y, rp.color, rp.name, rp.atFinish, rp.facing, rp.vx !== 0, rp.onGround, false);
@@ -351,9 +411,9 @@ function render(now) {
   if (won) {
     ctx.fillStyle = "rgba(0,0,0,0.45)";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = "#5dff8a";
     ctx.font = "bold 36px sans-serif";
     ctx.textAlign = "center";
+    ctx.fillStyle = `hsl(${(now / 4) % 360}, 100%, 65%)`;
     ctx.fillText("Победа! Команда добралась до финиша 🎉", canvas.width / 2, canvas.height / 2 - 10);
     ctx.font = "16px sans-serif";
     ctx.fillStyle = "#eef0f5";
@@ -362,21 +422,46 @@ function render(now) {
   }
 }
 
-function drawBackground(camX) {
-  // лёгкий параллакс: облака и холмы двигаются медленнее камеры
+// фон: цикличное по оттенку небо + плавающие неоновые кольца + параллакс-холмы
+function drawPsychedelicBackdrop(now, camX) {
+  const h1 = (now / 25) % 360;
+  const h2 = (h1 + 110) % 360;
+  const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  grad.addColorStop(0, `hsl(${h1}, 70%, 24%)`);
+  grad.addColorStop(1, `hsl(${h2}, 70%, 10%)`);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  for (let i = 0; i < 6; i++) {
+    const t = now / 1000 + i * 1.7;
+    const r = 50 + (Math.sin(t * 0.6) * 0.5 + 0.5) * 230;
+    const cx = canvas.width * 0.5 + Math.sin(t * 0.31 + i) * canvas.width * 0.4;
+    const cy = canvas.height * 0.35 + Math.cos(t * 0.23 + i) * canvas.height * 0.3;
+    const hue = (now / 9 + i * 60) % 360;
+    ctx.beginPath();
+    ctx.fillStyle = `hsla(${hue}, 100%, 60%, 0.07)`;
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+
   ctx.save();
   const cloudOffset = -(camX * 0.2) % 300;
-  ctx.fillStyle = "rgba(255,255,255,0.06)";
   for (let i = -1; i < canvas.width / 300 + 2; i++) {
     const x = cloudOffset + i * 300;
+    const hue = (now / 14 + i * 40) % 360;
+    ctx.fillStyle = `hsla(${hue}, 90%, 75%, 0.10)`;
     drawCloud(x + 40, 70);
     drawCloud(x + 180, 130);
   }
 
   const hillOffset = -(camX * 0.45) % 400;
-  ctx.fillStyle = "rgba(40,55,90,0.5)";
   for (let i = -1; i < canvas.width / 400 + 2; i++) {
     const x = hillOffset + i * 400;
+    const hue = (now / 11 + i * 50) % 360;
+    ctx.fillStyle = `hsla(${hue}, 70%, 45%, 0.45)`;
     ctx.beginPath();
     ctx.ellipse(x + 100, canvas.height - 20, 160, 70, 0, 0, Math.PI * 2);
     ctx.fill();
@@ -390,6 +475,44 @@ function drawCloud(x, y) {
   ctx.ellipse(x + 24, y + 4, 22, 13, 0, 0, Math.PI * 2);
   ctx.ellipse(x - 24, y + 4, 22, 13, 0, 0, Math.PI * 2);
   ctx.fill();
+}
+
+function drawRainbowFinish(f, now) {
+  ctx.save();
+  ctx.fillStyle = "#bfae7a";
+  ctx.fillRect(f.x + f.w / 2 - 3, f.y - 60, 6, 60);
+
+  const stripes = 6;
+  const stripeH = 60 / stripes;
+  for (let i = 0; i < stripes; i++) {
+    const hue = (now / 4 + i * 55) % 360;
+    ctx.fillStyle = `hsl(${hue}, 100%, 60%)`;
+    ctx.beginPath();
+    ctx.moveTo(f.x + f.w / 2 + 3, f.y - 60 + i * stripeH);
+    ctx.lineTo(f.x + f.w / 2 + 34, f.y - 60 + i * stripeH + stripeH / 2);
+    ctx.lineTo(f.x + f.w / 2 + 3, f.y - 60 + (i + 1) * stripeH);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ---------- радужный шлейф за игроками ----------
+function pushTrail(trail, x, y, now) {
+  trail.push({ x: x + PLAYER_W / 2, y: y + PLAYER_H / 2, t: now });
+  while (trail.length > 16) trail.shift();
+}
+
+function drawTrail(trail, now) {
+  for (let i = 0; i < trail.length; i++) {
+    const pt = trail[i];
+    const progress = i / trail.length;
+    const hue = (now / 5 + i * 22) % 360;
+    ctx.beginPath();
+    ctx.fillStyle = `hsla(${hue}, 100%, 65%, ${progress * 0.45})`;
+    ctx.arc(pt.x, pt.y, 3 + progress * 7, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
 // человечек: голова + туловище + руки/ноги, с простой анимацией ходьбы/прыжка
@@ -483,17 +606,16 @@ function drawHint(text) {
 // ---------- конфетти на победу ----------
 function spawnConfetti() {
   confetti.length = 0;
-  const colors = ["#ff5d5d", "#5da9ff", "#5dff8a", "#ffd25d", "#fff"];
-  for (let i = 0; i < 120; i++) {
+  for (let i = 0; i < 160; i++) {
     confetti.push({
       x: Math.random() * canvas.width,
       y: -20 - Math.random() * canvas.height * 0.5,
-      vx: (Math.random() - 0.5) * 80,
-      vy: 120 + Math.random() * 180,
-      size: 4 + Math.random() * 5,
-      color: colors[i % colors.length],
+      vx: (Math.random() - 0.5) * 100,
+      vy: 120 + Math.random() * 220,
+      size: 4 + Math.random() * 6,
+      hue: Math.random() * 360,
       rot: Math.random() * Math.PI,
-      vrot: (Math.random() - 0.5) * 6,
+      vrot: (Math.random() - 0.5) * 8,
     });
   }
 }
@@ -507,12 +629,16 @@ function updateConfetti(dt) {
 }
 
 function drawConfetti() {
+  const now = performance.now();
   for (const c of confetti) {
     if (c.y > canvas.height + 20) continue;
     ctx.save();
     ctx.translate(c.x, c.y);
     ctx.rotate(c.rot);
-    ctx.fillStyle = c.color;
+    const hue = (c.hue + now / 10) % 360;
+    ctx.fillStyle = `hsl(${hue}, 100%, 65%)`;
+    ctx.shadowColor = `hsl(${hue}, 100%, 70%)`;
+    ctx.shadowBlur = 8;
     ctx.fillRect(-c.size / 2, -c.size / 2, c.size, c.size);
     ctx.restore();
   }

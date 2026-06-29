@@ -12,6 +12,8 @@ import (
 )
 
 const maxPlayers = 4
+const minPlayersToStart = 2
+const countdownSeconds = 5
 
 var playerColors = []string{"#ff5d5d", "#5da9ff", "#5dff8a", "#ffd25d"}
 
@@ -177,7 +179,7 @@ func handleReady(id string) {
 	}
 	p.Ready = !p.Ready
 
-	allReady := len(room.players) > 0
+	allReady := len(room.players) >= minPlayersToStart
 	for _, other := range room.players {
 		if !other.Ready {
 			allReady = false
@@ -202,7 +204,7 @@ func handleReady(id string) {
 }
 
 func runCountdown(gen int) {
-	for s := 3; s >= 1; s-- {
+	for s := countdownSeconds; s >= 1; s-- {
 		room.mu.Lock()
 		cancelled := room.countdownGen != gen
 		room.mu.Unlock()
