@@ -34,6 +34,9 @@ let level = null;
 let won = false;
 let spectating = false;
 let inGame = false;
+let lastCheckpoint = { x: 0, y: 0 };
+let lastCheckpointKey = null; // "x,y" платформы — чтобы не срабатывать повторно каждый кадр
+let checkpointFlashUntil = 0;
 
 /** @type {Map<string, RemotePlayer>} */
 const remotePlayers = new Map();
@@ -171,6 +174,8 @@ function handleMessage(msg) {
       won = false;
       hintText = "";
       inGame = true;
+      lastCheckpoint = { x: level.start.x, y: level.start.y };
+      lastCheckpointKey = null;
       startGame();
       break;
 
@@ -320,7 +325,17 @@ function update(dt) {
   let fell = false;
 
   for (const pf of level.platforms) {
-    if (resolveCollision(pf)) me.onGround = true;
+    const landed = resolveCollision(pf);
+    if (landed) me.onGround = true;
+    if (landed && pf.checkpoint) {
+      const key = pf.x + "," + pf.y;
+      if (key !== lastCheckpointKey) {
+        lastCheckpointKey = key;
+        lastCheckpoint = { x: pf.x + pf.w / 2 - PLAYER_W / 2, y: pf.y - PLAYER_H };
+        checkpointFlashUntil = performance.now() + 900;
+        sfx(520, 1040, 220, "sine", 0.1);
+      }
+    }
   }
 
   if (!wasOnGround && me.onGround && fallSpeed > 900) {
@@ -328,8 +343,8 @@ function update(dt) {
   }
 
   if (me.y > level.height + 200) {
-    me.x = level.start.x;
-    me.y = level.start.y;
+    me.x = lastCheckpoint.x;
+    me.y = lastCheckpoint.y;
     me.vx = 0;
     me.vy = 0;
     fell = true;
@@ -409,6 +424,10 @@ function render(now) {
   ctx.translate(-camX + shakeX, -camY + shakeY);
 
   for (const pf of level.platforms) {
+    if (pf.checkpoint) {
+      drawCheckpointPlatform(pf, now);
+      continue;
+    }
     const hue = (now / 9 + pf.x * 0.06) % 360;
     ctx.save();
     ctx.shadowColor = `hsl(${hue}, 100%, 60%)`;
@@ -442,6 +461,7 @@ function render(now) {
   hud.textContent = `Игроков в комнате: ${total}/4 · на финише: ${atFinishCount}/${total}`;
 
   if (now < hintUntil && hintText) drawHint(hintText);
+  if (now < checkpointFlashUntil) drawCheckpointFlash(now);
 
   if (won) {
     ctx.fillStyle = "rgba(0,0,0,0.45)";
@@ -529,6 +549,40 @@ function drawRainbowFinish(f, now) {
     ctx.closePath();
     ctx.fill();
   }
+  ctx.restore();
+}
+
+// чекпоинт: платформа цвета золота с пульсирующим белым ореолом и флажком —
+// должна явно выделяться на фоне обычных неоновых платформ.
+function drawCheckpointPlatform(pf, now) {
+  const pulse = 0.5 + 0.5 * Math.sin(now / 250);
+  const isMine = lastCheckpointKey === pf.x + "," + pf.y;
+
+  ctx.save();
+  ctx.shadowColor = isMine ? "#ffffff" : "#ffd86b";
+  ctx.shadowBlur = 18 + pulse * 10;
+  ctx.fillStyle = "#caa23c";
+  ctx.fillRect(pf.x, pf.y, pf.w, pf.h);
+  ctx.fillStyle = isMine ? "#fff7d6" : "#ffe9a8";
+  ctx.fillRect(pf.x, pf.y, pf.w, 4);
+  ctx.restore();
+
+  // флажок
+  const poleX = pf.x + pf.w / 2;
+  ctx.save();
+  ctx.strokeStyle = "#e8d9a0";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(poleX, pf.y);
+  ctx.lineTo(poleX, pf.y - 34);
+  ctx.stroke();
+  ctx.fillStyle = isMine ? "#fff" : "#ffd25d";
+  ctx.beginPath();
+  ctx.moveTo(poleX, pf.y - 34);
+  ctx.lineTo(poleX + 22, pf.y - 27);
+  ctx.lineTo(poleX, pf.y - 20);
+  ctx.closePath();
+  ctx.fill();
   ctx.restore();
 }
 
@@ -634,6 +688,21 @@ function drawHint(text) {
   ctx.fillStyle = "#ffd25d";
   ctx.textAlign = "center";
   ctx.fillText("🤖 " + text, canvas.width / 2, 14 + 24);
+  ctx.textAlign = "left";
+  ctx.restore();
+}
+
+function drawCheckpointFlash(now) {
+  const t = checkpointFlashUntil - now;
+  const alpha = Math.min(1, t / 300);
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.font = "bold 22px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#ffe9a8";
+  ctx.shadowColor = "#ffd25d";
+  ctx.shadowBlur = 12;
+  ctx.fillText("⛳ Чекпоинт!", canvas.width / 2, 80);
   ctx.textAlign = "left";
   ctx.restore();
 }
