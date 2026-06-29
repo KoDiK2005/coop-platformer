@@ -178,6 +178,23 @@ func handleReady(id string) {
 		return
 	}
 	p.Ready = !p.Ready
+	room.mu.Unlock()
+
+	reevaluateCountdown()
+	broadcastLobby()
+}
+
+// reevaluateCountdown пересчитывает, должен ли идти обратный отсчёт, и
+// запускает/отменяет его. Нужно звать при любом изменении состава или
+// готовности игроков в лобби (ready-тоггл, отключение во время отсчёта) —
+// иначе отсчёт может продолжаться для уже опустевшей комнаты и она
+// застрянет в "playing" с нулём игроков навсегда.
+func reevaluateCountdown() {
+	room.mu.Lock()
+	if room.state != StateWaiting {
+		room.mu.Unlock()
+		return
+	}
 
 	allReady := len(room.players) >= minPlayersToStart
 	for _, other := range room.players {
@@ -193,14 +210,15 @@ func handleReady(id string) {
 		gen := room.countdownGen
 		room.mu.Unlock()
 		go runCountdown(gen)
-		broadcastLobby()
 		return
 	case !allReady && room.counting:
 		room.countdownGen++
 		room.counting = false
+		room.mu.Unlock()
+		broadcastAll(mustJSON(map[string]any{"type": "countdown", "seconds": 0}))
+		return
 	}
 	room.mu.Unlock()
-	broadcastLobby()
 }
 
 func runCountdown(gen int) {
@@ -218,6 +236,16 @@ func runCountdown(gen int) {
 	room.mu.Lock()
 	if room.countdownGen != gen {
 		room.mu.Unlock()
+		return
+	}
+	if len(room.players) < minPlayersToStart {
+		// все нужные игроки отвалились в последний момент — отменяем тихо,
+		// без перехода в playing с пустой/неполной комнатой.
+		room.counting = false
+		room.countdownGen++
+		room.mu.Unlock()
+		broadcastAll(mustJSON(map[string]any{"type": "countdown", "seconds": 0}))
+		broadcastLobby()
 		return
 	}
 	room.level = generateLevel(time.Now().UnixNano())
@@ -356,6 +384,7 @@ func handleDisconnect(id string) {
 	room.mu.Unlock()
 
 	log.Printf("игрок %s отключился", id)
+	reevaluateCountdown()
 	broadcastLobby()
 }
 
