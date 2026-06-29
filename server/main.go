@@ -145,6 +145,22 @@ func assignColor(r *Room) string {
 	return playerColors[0]
 }
 
+// allPlayersReady — чистая функция без побочных эффектов и блокировок,
+// поэтому её легко покрыть unit-тестами отдельно от сетевого кода. Именно
+// здесь раньше пряталась логика "нужно минимум 2" — вынесена в одно место,
+// чтобы handleReady/handleDisconnect/runCountdown не могли разойтись.
+func allPlayersReady(players map[string]*Player) bool {
+	if len(players) < minPlayersToStart {
+		return false
+	}
+	for _, p := range players {
+		if !p.Ready {
+			return false
+		}
+	}
+	return true
+}
+
 func readLoop(conn *Conn, id string) {
 	defer handleDisconnect(id)
 
@@ -198,13 +214,7 @@ func reevaluateCountdown() {
 		return
 	}
 
-	allReady := len(room.players) >= minPlayersToStart
-	for _, other := range room.players {
-		if !other.Ready {
-			allReady = false
-			break
-		}
-	}
+	allReady := allPlayersReady(room.players)
 
 	switch {
 	case allReady && !room.counting:
@@ -243,9 +253,10 @@ func runCountdown(gen int) {
 		room.mu.Unlock()
 		return
 	}
-	if len(room.players) < minPlayersToStart {
-		// все нужные игроки отвалились в последний момент — отменяем тихо,
-		// без перехода в playing с пустой/неполной комнатой.
+	if !allPlayersReady(room.players) {
+		// игроков стало меньше минимума или кто-то расхотел в последний
+		// момент — отменяем тихо, без перехода в playing с пустой/неполной
+		// или не полностью готовой комнатой.
 		room.counting = false
 		room.countdownGen++
 		room.mu.Unlock()
