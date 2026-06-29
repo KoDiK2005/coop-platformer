@@ -87,15 +87,38 @@ function join() {
   connect(name);
 }
 
+let intentionalClose = false;
+
 function connect(name) {
   statusEl.textContent = "Подключение...";
+  intentionalClose = false;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws?name=${encodeURIComponent(name)}`);
 
   ws.onopen = () => { statusEl.textContent = ""; };
-  ws.onclose = () => { statusEl.textContent = "Соединение закрыто."; };
+  ws.onclose = () => {
+    if (!intentionalClose) {
+      showConnectionLost("Соединение с сервером потеряно. Введите имя и подключитесь снова.");
+    }
+    intentionalClose = false;
+  };
   ws.onerror = () => { statusEl.textContent = "Ошибка соединения с сервером."; };
   ws.onmessage = (ev) => handleMessage(JSON.parse(ev.data));
+}
+
+// Без этого разрыв связи (закрыл вкладку у партнёра, упал Wi-Fi, сервер
+// перезапустили) оставлял экран зрителя замороженным на последнем известном
+// состоянии без какой-либо обратной связи — выглядело как "зависшая" игра.
+function showConnectionLost(message) {
+  waitingRoom.style.display = "none";
+  canvas.style.display = "none";
+  canvas.style.filter = "none";
+  hud.style.display = "none";
+  nameScreen.style.display = "block";
+  statusEl.textContent = message;
+  level = null;
+  won = false;
+  remotePlayers.clear();
 }
 
 function toggleReady() {
@@ -106,6 +129,7 @@ function handleMessage(msg) {
   switch (msg.type) {
     case "full":
       statusEl.textContent = "Комната заполнена (максимум 4 игрока). Попробуйте позже.";
+      intentionalClose = true;
       ws.close();
       break;
 

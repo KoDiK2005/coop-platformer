@@ -178,8 +178,10 @@ func handleReady(id string) {
 		return
 	}
 	p.Ready = !p.Ready
+	ready := p.Ready
 	room.mu.Unlock()
 
+	log.Printf("игрок %s готовность=%v", id, ready)
 	reevaluateCountdown()
 	broadcastLobby()
 }
@@ -208,13 +210,16 @@ func reevaluateCountdown() {
 	case allReady && !room.counting:
 		room.counting = true
 		gen := room.countdownGen
+		playerCount := len(room.players)
 		room.mu.Unlock()
+		log.Printf("все готовы (%d игроков) — запускаю отсчёт", playerCount)
 		go runCountdown(gen)
 		return
 	case !allReady && room.counting:
 		room.countdownGen++
 		room.counting = false
 		room.mu.Unlock()
+		log.Println("отсчёт отменён — не все готовы или игрок вышел")
 		broadcastAll(mustJSON(map[string]any{"type": "countdown", "seconds": 0}))
 		return
 	}
@@ -264,6 +269,7 @@ func runCountdown(gen int) {
 	players := snapshotPlayers(room)
 	room.mu.Unlock()
 
+	log.Printf("раунд стартовал, игроков: %d", len(players))
 	broadcastAll(mustJSON(map[string]any{"type": "countdown", "seconds": 0}))
 	broadcastToPlayers(mustJSON(map[string]any{
 		"type":    "start",

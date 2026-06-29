@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 const wsMagicGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -29,9 +30,16 @@ const (
 // Conn оборачивает поднятое (hijacked) TCP-соединение и умеет читать/писать
 // неразбитые (unfragmented) WebSocket-фреймы — этого достаточно для коротких
 // JSON-сообщений, которыми обмениваются клиент и сервер этой игры.
+//
+// На одно соединение пишут разные горутины (например, и обработчик
+// "ready", и таймер обратного отсчёта почти одновременно рассылают своё
+// сообщение). Без writeMu их байты могут переплестись в один TCP-сегмент и
+// сломать структуру WebSocket-фрейма — клиент увидит это как мгновенный
+// разрыв соединения (код 1006), что и выглядело как "комната не отвечает".
 type Conn struct {
-	rw   *bufio.ReadWriter
-	conn net.Conn
+	rw      *bufio.ReadWriter
+	conn    net.Conn
+	writeMu sync.Mutex
 }
 
 var errUnsupportedFrame = errors.New("ws: фрагментированные или управляющие фреймы такого типа не поддерживаются")
@@ -182,6 +190,9 @@ func (c *Conn) writeFrame(opcode byte, payload []byte) error {
 		header = append(header, 127)
 		header = append(header, ext...)
 	}
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 
 	if _, err := c.rw.Write(header); err != nil {
 		return err
