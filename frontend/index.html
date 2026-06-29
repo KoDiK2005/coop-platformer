@@ -18,14 +18,16 @@
   }
   h1 { margin: 16px 0 4px; font-size: 22px; }
   #sub { color: #9aa2b8; font-size: 13px; margin-bottom: 12px; }
-  #lobby {
+
+  .panel {
     background: #262b3a;
     padding: 20px 28px;
     border-radius: 12px;
     text-align: center;
     margin-bottom: 16px;
+    min-width: 320px;
   }
-  #lobby input {
+  .panel input {
     padding: 8px 10px;
     border-radius: 6px;
     border: 1px solid #3a4156;
@@ -34,7 +36,7 @@
     font-size: 14px;
     margin-right: 8px;
   }
-  #lobby button {
+  .panel button {
     padding: 8px 16px;
     border-radius: 6px;
     border: none;
@@ -44,8 +46,28 @@
     cursor: pointer;
     font-size: 14px;
   }
-  #lobby button:hover { background: #7cbcff; }
+  .panel button:hover { background: #7cbcff; }
+  .panel button.ready-on { background: #5dff8a; }
   #status { margin-top: 8px; font-size: 13px; color: #9aa2b8; min-height: 16px; }
+
+  #waitingRoom { display: none; }
+  #playerList { list-style: none; padding: 0; margin: 14px 0; text-align: left; }
+  #playerList li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: #1b1f2a;
+    margin-bottom: 6px;
+    font-size: 14px;
+  }
+  #playerList .dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+  #playerList .readyTag { margin-left: auto; font-size: 12px; color: #6c7388; }
+  #playerList .readyTag.on { color: #5dff8a; font-weight: 600; }
+  #countdownText { font-size: 28px; font-weight: 700; color: #ffd25d; min-height: 36px; margin-top: 6px; }
+  #spectatorNotice { font-size: 13px; color: #ffd25d; margin-top: 8px; display: none; }
+
   canvas {
     background: linear-gradient(#2b3550, #1b1f2a);
     border: 2px solid #3a4156;
@@ -71,10 +93,18 @@
   <h1>Кооп-платформер</h1>
   <div id="sub">До 4 игроков, общая цель — добраться до финиша вместе</div>
 
-  <div id="lobby">
+  <div class="panel" id="nameScreen">
     <input id="nameInput" type="text" placeholder="Ваше имя" maxlength="16">
     <button id="joinBtn">Войти в игру</button>
     <div id="status"></div>
+  </div>
+
+  <div class="panel" id="waitingRoom">
+    <div style="font-size:15px;font-weight:600;">Комната ожидания</div>
+    <ul id="playerList"></ul>
+    <button id="readyBtn">Готов</button>
+    <div id="countdownText"></div>
+    <div id="spectatorNotice">Раунд уже идёт — вы присоединитесь к следующему</div>
   </div>
 
   <canvas id="game" width="960" height="540"></canvas>

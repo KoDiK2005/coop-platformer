@@ -38,7 +38,7 @@ type ollamaResponse struct {
 
 func sendAIHint(fallCount int) {
 	text := requestHintFromOllama(fallCount)
-	broadcastExcept("", mustJSON(map[string]any{
+	broadcastToPlayers(mustJSON(map[string]any{
 		"type": "hint",
 		"text": text,
 	}))

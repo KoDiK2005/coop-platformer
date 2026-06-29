@@ -15,6 +15,14 @@ const maxPlayers = 4
 
 var playerColors = []string{"#ff5d5d", "#5da9ff", "#5dff8a", "#ffd25d"}
 
+type RoomState string
+
+const (
+	StateWaiting  RoomState = "waiting"  // лобби: игроки выставляют готовность
+	StatePlaying  RoomState = "playing"  // раунд идёт
+	StateFinished RoomState = "finished" // победа, идёт пауза перед возвратом в лобби
+)
+
 // Player — состояние одного подключённого игрока с точки зрения сервера.
 // Позиция приходит от клиента (клиент авторитативен по физике — это
 // кооп-игра без анти-чита, упрощение оправдано масштабом проекта).
@@ -27,34 +35,45 @@ type Player struct {
 	VX       float64 `json:"vx"`
 	VY       float64 `json:"vy"`
 	Facing   int     `json:"facing"`
+	OnGround bool    `json:"onGround"`
 	AtFinish bool    `json:"atFinish"`
+	Ready    bool    `json:"ready"`
 
 	conn *Conn
 }
 
-// Room — единственная игровая комната (до 4 игроков), создаётся автоматически
-// при первом подключении и пересоздаётся (новый уровень), когда опустеет.
+// Room — единственная игровая комната (до 4 игроков). Игроки, подключившиеся
+// во время идущего раунда, попадают в очередь зрителей и становятся
+// участниками со следующего раунда.
 type Room struct {
-	mu        sync.Mutex
-	players   map[string]*Player
+	mu sync.Mutex
+
+	state RoomState
+
+	players map[string]*Player
+	queue   []*Player
+
 	level     Level
 	fallCount int
 	lastHint  time.Time
-	won       bool
+
+	counting     bool
+	countdownGen int
 }
 
-var room = &Room{players: make(map[string]*Player)}
+var room = &Room{players: make(map[string]*Player), state: StateWaiting}
 
 type inMessage struct {
-	Type string  `json:"type"`
-	Name string  `json:"name"`
-	X    float64 `json:"x"`
-	Y    float64 `json:"y"`
-	VX   float64 `json:"vx"`
-	VY   float64 `json:"vy"`
-	Facing   int  `json:"facing"`
-	AtFinish bool `json:"atFinish"`
-	Fell     bool `json:"fell"`
+	Type     string  `json:"type"`
+	Name     string  `json:"name"`
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	VX       float64 `json:"vx"`
+	VY       float64 `json:"vy"`
+	Facing   int     `json:"facing"`
+	OnGround bool    `json:"onGround"`
+	AtFinish bool    `json:"atFinish"`
+	Fell     bool    `json:"fell"`
 }
 
 func main() {
@@ -80,50 +99,48 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		name = "Игрок"
+	}
+
 	room.mu.Lock()
-	if len(room.players) >= maxPlayers {
+	if len(room.players)+len(room.queue) >= maxPlayers {
 		room.mu.Unlock()
 		_ = conn.WriteMessage(mustJSON(map[string]any{"type": "full"}))
 		conn.Close()
 		return
 	}
-	if len(room.players) == 0 {
-		room.level = generateLevel(time.Now().UnixNano())
-		room.fallCount = 0
-		room.won = false
-	}
 
 	id := randomID()
-	color := playerColors[len(room.players)]
-	p := &Player{
-		ID:    id,
-		Name:  "Игрок",
-		Color: color,
-		X:     room.level.Start.X,
-		Y:     room.level.Start.Y,
-		conn:  conn,
-	}
-	room.players[id] = p
+	p := &Player{ID: id, Name: name, conn: conn}
 
-	others := snapshotPlayers(room)
+	spectating := room.state != StateWaiting
+	if spectating {
+		room.queue = append(room.queue, p)
+	} else {
+		p.Color = assignColor(room)
+		room.players[id] = p
+	}
 	room.mu.Unlock()
 
-	log.Printf("игрок %s подключился (%d/%d)", id, len(others), maxPlayers)
+	log.Printf("игрок %s (%s) подключился, режим=%s", id, name, room.state)
 
-	_ = conn.WriteMessage(mustJSON(map[string]any{
-		"type":    "init",
-		"id":      id,
-		"color":   color,
-		"level":   room.level,
-		"players": others,
-	}))
-
-	broadcastExcept(id, mustJSON(map[string]any{
-		"type":   "join",
-		"player": p,
-	}))
-
+	broadcastLobby()
 	readLoop(conn, id)
+}
+
+func assignColor(r *Room) string {
+	used := make(map[string]bool, len(r.players))
+	for _, p := range r.players {
+		used[p.Color] = true
+	}
+	for _, c := range playerColors {
+		if !used[c] {
+			return c
+		}
+	}
+	return playerColors[0]
 }
 
 func readLoop(conn *Conn, id string) {
@@ -143,45 +160,130 @@ func readLoop(conn *Conn, id string) {
 }
 
 func handleClientMessage(id string, msg inMessage) {
+	switch msg.Type {
+	case "ready":
+		handleReady(id)
+	case "move":
+		handleMove(id, msg)
+	}
+}
+
+func handleReady(id string) {
 	room.mu.Lock()
+	p, ok := room.players[id]
+	if !ok || room.state != StateWaiting {
+		room.mu.Unlock()
+		return
+	}
+	p.Ready = !p.Ready
+
+	allReady := len(room.players) > 0
+	for _, other := range room.players {
+		if !other.Ready {
+			allReady = false
+			break
+		}
+	}
+
+	switch {
+	case allReady && !room.counting:
+		room.counting = true
+		gen := room.countdownGen
+		room.mu.Unlock()
+		go runCountdown(gen)
+		broadcastLobby()
+		return
+	case !allReady && room.counting:
+		room.countdownGen++
+		room.counting = false
+	}
+	room.mu.Unlock()
+	broadcastLobby()
+}
+
+func runCountdown(gen int) {
+	for s := 3; s >= 1; s-- {
+		room.mu.Lock()
+		cancelled := room.countdownGen != gen
+		room.mu.Unlock()
+		if cancelled {
+			return
+		}
+		broadcastAll(mustJSON(map[string]any{"type": "countdown", "seconds": s}))
+		time.Sleep(1 * time.Second)
+	}
+
+	room.mu.Lock()
+	if room.countdownGen != gen {
+		room.mu.Unlock()
+		return
+	}
+	room.level = generateLevel(time.Now().UnixNano())
+	room.state = StatePlaying
+	room.counting = false
+	room.fallCount = 0
+	room.lastHint = time.Time{}
+	for _, p := range room.players {
+		p.X, p.Y = room.level.Start.X, room.level.Start.Y
+		p.VX, p.VY = 0, 0
+		p.OnGround = true
+		p.AtFinish = false
+		p.Ready = false
+	}
+	level := room.level
+	players := snapshotPlayers(room)
+	room.mu.Unlock()
+
+	broadcastAll(mustJSON(map[string]any{"type": "countdown", "seconds": 0}))
+	broadcastToPlayers(mustJSON(map[string]any{
+		"type":    "start",
+		"level":   level,
+		"players": players,
+	}))
+	broadcastLobby()
+}
+
+func handleMove(id string, msg inMessage) {
+	room.mu.Lock()
+	if room.state != StatePlaying {
+		room.mu.Unlock()
+		return
+	}
 	p, ok := room.players[id]
 	if !ok {
 		room.mu.Unlock()
 		return
 	}
 
-	switch msg.Type {
-	case "move":
-		p.X, p.Y, p.VX, p.VY, p.Facing = msg.X, msg.Y, msg.VX, msg.VY, msg.Facing
-		if msg.Name != "" {
-			p.Name = msg.Name
-		}
-		p.AtFinish = msg.AtFinish
-		if msg.Fell {
-			room.fallCount++
-		}
+	p.X, p.Y, p.VX, p.VY, p.Facing, p.OnGround = msg.X, msg.Y, msg.VX, msg.VY, msg.Facing, msg.OnGround
+	p.AtFinish = msg.AtFinish
+	if msg.Fell {
+		room.fallCount++
 	}
 
-	allAtFinish := len(room.players) > 0 && !room.won
+	allAtFinish := len(room.players) > 0
 	for _, other := range room.players {
 		if !other.AtFinish {
 			allAtFinish = false
 			break
 		}
 	}
+
+	justWon := false
 	if allAtFinish {
-		room.won = true
+		room.state = StateFinished
+		justWon = true
 	}
 
 	shouldHint := false
-	if !room.won && room.fallCount > 0 && room.fallCount%3 == 0 && time.Since(room.lastHint) > 20*time.Second {
+	if !justWon && room.fallCount > 0 && room.fallCount%3 == 0 && time.Since(room.lastHint) > 20*time.Second {
 		shouldHint = true
 		room.lastHint = time.Now()
 	}
 	fallCount := room.fallCount
 	room.mu.Unlock()
 
-	broadcastExcept("", mustJSON(map[string]any{
+	broadcastToPlayersExcept("", mustJSON(map[string]any{
 		"type":     "move",
 		"id":       p.ID,
 		"name":     p.Name,
@@ -190,33 +292,92 @@ func handleClientMessage(id string, msg inMessage) {
 		"vx":       p.VX,
 		"vy":       p.VY,
 		"facing":   p.Facing,
+		"onGround": p.OnGround,
 		"atFinish": p.AtFinish,
 	}))
 
-	if allAtFinish {
-		broadcastExcept("", mustJSON(map[string]any{"type": "win"}))
-	}
-
-	if shouldHint {
+	if justWon {
+		broadcastToPlayers(mustJSON(map[string]any{"type": "win"}))
+		go finishRoundAfterDelay()
+	} else if shouldHint {
 		go sendAIHint(fallCount)
 	}
+}
+
+// finishRoundAfterDelay даёт игрокам полюбоваться победой, затем переводит
+// комнату обратно в лобби, подмешивая зрителей из очереди в новый раунд.
+func finishRoundAfterDelay() {
+	time.Sleep(6 * time.Second)
+
+	room.mu.Lock()
+	if room.state != StateFinished {
+		room.mu.Unlock()
+		return
+	}
+	room.state = StateWaiting
+	for _, p := range room.players {
+		p.Ready = false
+		p.AtFinish = false
+	}
+	for _, p := range room.queue {
+		p.Color = assignColor(room)
+		p.Ready = false
+		room.players[p.ID] = p
+	}
+	room.queue = nil
+	room.mu.Unlock()
+
+	broadcastLobby()
 }
 
 func handleDisconnect(id string) {
 	room.mu.Lock()
 	delete(room.players, id)
-	empty := len(room.players) == 0
+	for i, p := range room.queue {
+		if p.ID == id {
+			room.queue = append(room.queue[:i], room.queue[i+1:]...)
+			break
+		}
+	}
+
+	if len(room.players) == 0 && room.state != StateWaiting {
+		room.state = StateWaiting
+		room.counting = false
+		room.countdownGen++
+		for _, p := range room.queue {
+			p.Color = assignColor(room)
+			p.Ready = false
+			room.players[p.ID] = p
+		}
+		room.queue = nil
+	}
 	room.mu.Unlock()
 
 	log.Printf("игрок %s отключился", id)
-	broadcastExcept(id, mustJSON(map[string]any{"type": "leave", "id": id}))
+	broadcastLobby()
+}
 
-	if empty {
-		log.Println("комната пуста — уровень будет пересоздан для следующей сессии")
+// broadcastAll шлёт сырое сообщение абсолютно всем подключённым (игрокам и
+// зрителям в очереди) — используется для countdown, который должны видеть все.
+func broadcastAll(data []byte) {
+	room.mu.Lock()
+	targets := make([]*Player, 0, len(room.players)+len(room.queue))
+	for _, p := range room.players {
+		targets = append(targets, p)
+	}
+	targets = append(targets, room.queue...)
+	room.mu.Unlock()
+
+	for _, p := range targets {
+		_ = p.conn.WriteMessage(data)
 	}
 }
 
-func broadcastExcept(excludeID string, data []byte) {
+func broadcastToPlayers(data []byte) {
+	broadcastToPlayersExcept("", data)
+}
+
+func broadcastToPlayersExcept(excludeID string, data []byte) {
 	room.mu.Lock()
 	targets := make([]*Player, 0, len(room.players))
 	for _, p := range room.players {
@@ -228,6 +389,44 @@ func broadcastExcept(excludeID string, data []byte) {
 
 	for _, p := range targets {
 		_ = p.conn.WriteMessage(data)
+	}
+}
+
+// broadcastLobby отправляет каждому подключённому персонализированный снимок
+// лобби (его собственный id и флаг "я зритель"), чтобы клиент знал, что рисовать.
+func broadcastLobby() {
+	room.mu.Lock()
+	players := snapshotPlayers(room)
+	state := room.state
+	queue := append([]*Player{}, room.queue...)
+	room.mu.Unlock()
+
+	type lobbyPlayer struct {
+		ID    string `json:"id"`
+		Name  string `json:"name"`
+		Color string `json:"color"`
+		Ready bool   `json:"ready"`
+	}
+	list := make([]lobbyPlayer, 0, len(players))
+	for _, p := range players {
+		list = append(list, lobbyPlayer{p.ID, p.Name, p.Color, p.Ready})
+	}
+
+	send := func(p *Player, spectating bool) {
+		_ = p.conn.WriteMessage(mustJSON(map[string]any{
+			"type":       "lobby",
+			"state":      state,
+			"yourId":     p.ID,
+			"spectating": spectating,
+			"players":    list,
+			"queueCount": len(queue),
+		}))
+	}
+	for _, p := range players {
+		send(p, false)
+	}
+	for _, p := range queue {
+		send(p, true)
 	}
 }
 

@@ -1,33 +1,41 @@
-// Кооп-платформер: клиентская физика, рендер на Canvas, синхронизация по WebSocket.
+// Кооп-платформер: лобби с готовностью, клиентская физика, рендер
+// человечков на Canvas, синхронизация по WebSocket.
 
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
-const lobby = document.getElementById("lobby");
+const nameScreen = document.getElementById("nameScreen");
+const waitingRoom = document.getElementById("waitingRoom");
 const nameInput = document.getElementById("nameInput");
 const joinBtn = document.getElementById("joinBtn");
 const statusEl = document.getElementById("status");
 const hud = document.getElementById("hud");
+const playerListEl = document.getElementById("playerList");
+const readyBtn = document.getElementById("readyBtn");
+const countdownTextEl = document.getElementById("countdownText");
+const spectatorNoticeEl = document.getElementById("spectatorNotice");
 
 const GRAVITY = 1800;
 const MOVE_SPEED = 320;
 const JUMP_VELOCITY = -650;
-const PLAYER_W = 28;
-const PLAYER_H = 38;
+const PLAYER_W = 22;
+const PLAYER_H = 42;
 const SEND_INTERVAL_MS = 50;
 
 let ws = null;
 let myId = null;
 let myColor = "#5da9ff";
 let myName = "Игрок";
+let myReady = false;
 let level = null;
 let won = false;
+let spectating = false;
 
 /** @type {Map<string, RemotePlayer>} */
 const remotePlayers = new Map();
 
 const me = {
   x: 0, y: 0, vx: 0, vy: 0,
-  onGround: false,
+  onGround: true,
   facing: 1,
   atFinish: false,
 };
@@ -37,24 +45,56 @@ const keys = { left: false, right: false, jump: false };
 let hintText = "";
 let hintUntil = 0;
 
+const confetti = [];
+
+// ---------- звук (синтез через WebAudio, без файлов) ----------
+let audioCtx = null;
+function sfx(freqStart, freqEnd, durationMs, type = "sine", volume = 0.15) {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freqStart, audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(freqEnd, 1), audioCtx.currentTime + durationMs / 1000);
+    gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + durationMs / 1000);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + durationMs / 1000);
+  } catch (e) { /* звук не критичен для игры */ }
+}
+function playJumpSound() { sfx(420, 720, 140, "square", 0.08); }
+function playWinSound() {
+  sfx(440, 880, 180, "sine", 0.12);
+  setTimeout(() => sfx(660, 1100, 220, "sine", 0.12), 140);
+  setTimeout(() => sfx(880, 1320, 300, "sine", 0.12), 300);
+}
+
+// ---------- лобби ----------
 joinBtn.addEventListener("click", join);
 nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") join(); });
+readyBtn.addEventListener("click", toggleReady);
 
 function join() {
   const name = (nameInput.value || "Игрок").trim().slice(0, 16) || "Игрок";
   myName = name;
-  connect();
+  connect(name);
 }
 
-function connect() {
+function connect(name) {
   statusEl.textContent = "Подключение...";
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws = new WebSocket(`${proto}://${location.host}/ws?name=${encodeURIComponent(name)}`);
 
-  ws.onopen = () => { statusEl.textContent = "Подключено. Ждём данные уровня..."; };
+  ws.onopen = () => { statusEl.textContent = ""; };
   ws.onclose = () => { statusEl.textContent = "Соединение закрыто."; };
   ws.onerror = () => { statusEl.textContent = "Ошибка соединения с сервером."; };
   ws.onmessage = (ev) => handleMessage(JSON.parse(ev.data));
+}
+
+function toggleReady() {
+  send({ type: "ready" });
 }
 
 function handleMessage(msg) {
@@ -64,30 +104,39 @@ function handleMessage(msg) {
       ws.close();
       break;
 
-    case "init":
-      myId = msg.id;
-      myColor = msg.color;
+    case "lobby":
+      myId = msg.yourId;
+      spectating = msg.spectating;
+      const me_ = msg.players.find(p => p.id === myId);
+      if (me_) { myColor = me_.color; myReady = me_.ready; }
+      showWaitingRoom(msg);
+      break;
+
+    case "countdown":
+      countdownTextEl.textContent = msg.seconds > 0 ? `Старт через ${msg.seconds}...` : "";
+      break;
+
+    case "start":
       level = msg.level;
-      me.x = level.start.x;
-      me.y = level.start.y;
-      for (const p of msg.players || []) {
-        if (p.id !== myId) remotePlayers.set(p.id, toRemote(p));
+      remotePlayers.clear();
+      for (const p of msg.players) {
+        if (p.id === myId) {
+          me.x = p.x; me.y = p.y; me.vx = 0; me.vy = 0; me.onGround = true; me.atFinish = false;
+        } else {
+          remotePlayers.set(p.id, toRemote(p));
+        }
       }
+      won = false;
+      hintText = "";
       startGame();
-      break;
-
-    case "join":
-      if (msg.player.id !== myId) remotePlayers.set(msg.player.id, toRemote(msg.player));
-      break;
-
-    case "leave":
-      remotePlayers.delete(msg.id);
       break;
 
     case "move":
       if (msg.id !== myId) {
         const rp = remotePlayers.get(msg.id) || toRemote({ color: "#999" });
-        rp.x = msg.x; rp.y = msg.y; rp.facing = msg.facing; rp.name = msg.name || rp.name;
+        rp.x = msg.x; rp.y = msg.y; rp.vx = msg.vx; rp.vy = msg.vy;
+        rp.facing = msg.facing; rp.onGround = msg.onGround;
+        rp.name = msg.name || rp.name;
         rp.atFinish = msg.atFinish;
         remotePlayers.set(msg.id, rp);
       }
@@ -100,21 +149,54 @@ function handleMessage(msg) {
 
     case "win":
       won = true;
+      playWinSound();
+      spawnConfetti();
       break;
   }
 }
 
 function toRemote(p) {
-  return { x: p.x, y: p.y, facing: 1, color: p.color || "#999", name: p.name || "Игрок", atFinish: !!p.atFinish };
+  return {
+    x: p.x, y: p.y, vx: 0, vy: 0, onGround: true, facing: 1,
+    color: p.color || "#999", name: p.name || "Игрок", atFinish: !!p.atFinish,
+  };
 }
 
-function startGame() {
-  lobby.style.display = "none";
-  canvas.style.display = "block";
-  hud.style.display = "block";
-  requestAnimationFrame(loop);
+function showWaitingRoom(msg) {
+  nameScreen.style.display = "none";
+  canvas.style.display = "none";
+  hud.style.display = "none";
+  waitingRoom.style.display = "block";
+
+  playerListEl.innerHTML = "";
+  for (const p of msg.players) {
+    const li = document.createElement("li");
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    dot.style.background = p.color;
+    const label = document.createElement("span");
+    label.textContent = p.name + (p.id === myId ? " (вы)" : "");
+    const tag = document.createElement("span");
+    tag.className = "readyTag" + (p.ready ? " on" : "");
+    tag.textContent = p.ready ? "Готов" : "Не готов";
+    li.append(dot, label, tag);
+    playerListEl.appendChild(li);
+  }
+
+  if (msg.queueCount > 0) {
+    const li = document.createElement("li");
+    li.style.color = "#6c7388";
+    li.textContent = `Зрителей в очереди: ${msg.queueCount} (присоединятся к следующему раунду)`;
+    playerListEl.appendChild(li);
+  }
+
+  readyBtn.classList.toggle("ready-on", myReady);
+  readyBtn.textContent = myReady ? "Готов ✓" : "Готов";
+  readyBtn.style.display = spectating ? "none" : "inline-block";
+  spectatorNoticeEl.style.display = spectating ? "block" : "none";
 }
 
+// ---------- управление ----------
 window.addEventListener("keydown", (e) => setKey(e.code, true));
 window.addEventListener("keyup", (e) => setKey(e.code, false));
 
@@ -124,16 +206,27 @@ function setKey(code, value) {
   if (code === "ArrowUp" || code === "KeyW" || code === "Space") keys.jump = value;
 }
 
+// ---------- игровой цикл ----------
+function startGame() {
+  waitingRoom.style.display = "none";
+  canvas.style.display = "block";
+  hud.style.display = "block";
+  requestAnimationFrame(loop);
+}
+
 let lastTime = performance.now();
 let lastSend = 0;
+let walkPhase = 0;
 
 function loop(now) {
   const dt = Math.min((now - lastTime) / 1000, 0.05);
   lastTime = now;
 
-  if (!won) update(dt);
+  if (!won && canvas.style.display !== "none") update(dt);
+  if (won) updateConfetti(dt);
   render(now);
-  requestAnimationFrame(loop);
+
+  if (canvas.style.display !== "none") requestAnimationFrame(loop);
 }
 
 function update(dt) {
@@ -144,11 +237,14 @@ function update(dt) {
   if (keys.jump && me.onGround) {
     me.vy = JUMP_VELOCITY;
     me.onGround = false;
+    playJumpSound();
   }
 
   me.vy += GRAVITY * dt;
   me.x += me.vx * dt;
   me.y += me.vy * dt;
+
+  if (me.vx !== 0) walkPhase += dt * 10;
 
   me.onGround = false;
   let fell = false;
@@ -171,18 +267,16 @@ function update(dt) {
   me.atFinish = aabbOverlap(me.x, me.y, PLAYER_W, PLAYER_H, f.x, f.y - 60, f.w, f.h + 60);
 
   const now = performance.now();
-  if (now - lastSend > SEND_INTERVAL_MS) {
+  if (now - lastSend > SEND_INTERVAL_MS || fell) {
     lastSend = now;
     send({
       type: "move",
-      name: myName,
       x: me.x, y: me.y, vx: me.vx, vy: me.vy,
       facing: me.facing,
+      onGround: me.onGround,
       atFinish: me.atFinish,
       fell,
     });
-  } else if (fell) {
-    send({ type: "move", name: myName, x: me.x, y: me.y, vx: me.vx, vy: me.vy, facing: me.facing, atFinish: me.atFinish, fell: true });
   }
 }
 
@@ -195,7 +289,6 @@ function resolveCollision(pf) {
     me.vy = 0;
     return true;
   }
-  // боковое столкновение — просто останавливаем горизонтальное движение
   if (me.x + PLAYER_W > pf.x && me.x < pf.x) me.x = pf.x - PLAYER_W;
   else if (me.x < pf.x + pf.w && me.x + PLAYER_W > pf.x + pf.w) me.x = pf.x + pf.w;
   return false;
@@ -209,25 +302,30 @@ function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
+// ---------- рендер ----------
 function render(now) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!level) return;
 
   const camX = clamp(me.x - canvas.width / 2, 0, Math.max(0, level.width - canvas.width));
 
+  drawBackground(camX);
+
   ctx.save();
   ctx.translate(-camX, 0);
 
-  // платформы
   ctx.fillStyle = "#4a5578";
   for (const pf of level.platforms) {
     ctx.fillRect(pf.x, pf.y, pf.w, pf.h);
+    ctx.fillStyle = "#5c6896";
+    ctx.fillRect(pf.x, pf.y, pf.w, 4);
+    ctx.fillStyle = "#4a5578";
   }
 
-  // финиш
   const f = level.finish;
-  ctx.fillStyle = "#5dff8a";
+  ctx.fillStyle = "#bfae7a";
   ctx.fillRect(f.x + f.w / 2 - 3, f.y - 60, 6, 60);
+  ctx.fillStyle = "#5dff8a";
   ctx.beginPath();
   ctx.moveTo(f.x + f.w / 2 + 3, f.y - 60);
   ctx.lineTo(f.x + f.w / 2 + 34, f.y - 50);
@@ -235,48 +333,136 @@ function render(now) {
   ctx.closePath();
   ctx.fill();
 
-  // другие игроки
-  for (const [id, rp] of remotePlayers) {
-    drawPlayer(rp.x, rp.y, rp.color, rp.name, rp.atFinish);
+  for (const [, rp] of remotePlayers) {
+    drawHuman(rp.x, rp.y, rp.color, rp.name, rp.atFinish, rp.facing, rp.vx !== 0, rp.onGround, false);
   }
-
-  // я
-  drawPlayer(me.x, me.y, myColor, myName, me.atFinish, true);
+  drawHuman(me.x, me.y, myColor, myName, me.atFinish, me.facing, me.vx !== 0, me.onGround, true);
 
   ctx.restore();
 
-  // HUD
+  drawConfetti();
+
   const total = remotePlayers.size + 1;
   const atFinishCount = [...remotePlayers.values()].filter(p => p.atFinish).length + (me.atFinish ? 1 : 0);
   hud.textContent = `Игроков в комнате: ${total}/4 · на финише: ${atFinishCount}/${total}`;
 
-  if (now < hintUntil && hintText) {
-    drawHint(hintText);
-  }
+  if (now < hintUntil && hintText) drawHint(hintText);
 
   if (won) {
-    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = "#5dff8a";
-    ctx.font = "bold 42px sans-serif";
+    ctx.font = "bold 36px sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText("Победа! Команда добралась до финиша 🎉", canvas.width / 2, canvas.height / 2);
+    ctx.fillText("Победа! Команда добралась до финиша 🎉", canvas.width / 2, canvas.height / 2 - 10);
+    ctx.font = "16px sans-serif";
+    ctx.fillStyle = "#eef0f5";
+    ctx.fillText("Возвращение в комнату ожидания...", canvas.width / 2, canvas.height / 2 + 26);
     ctx.textAlign = "left";
   }
 }
 
-function drawPlayer(x, y, color, name, atFinish, isMe) {
-  ctx.fillStyle = color;
-  ctx.fillRect(x, y, PLAYER_W, PLAYER_H);
+function drawBackground(camX) {
+  // лёгкий параллакс: облака и холмы двигаются медленнее камеры
+  ctx.save();
+  const cloudOffset = -(camX * 0.2) % 300;
+  ctx.fillStyle = "rgba(255,255,255,0.06)";
+  for (let i = -1; i < canvas.width / 300 + 2; i++) {
+    const x = cloudOffset + i * 300;
+    drawCloud(x + 40, 70);
+    drawCloud(x + 180, 130);
+  }
+
+  const hillOffset = -(camX * 0.45) % 400;
+  ctx.fillStyle = "rgba(40,55,90,0.5)";
+  for (let i = -1; i < canvas.width / 400 + 2; i++) {
+    const x = hillOffset + i * 400;
+    ctx.beginPath();
+    ctx.ellipse(x + 100, canvas.height - 20, 160, 70, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawCloud(x, y) {
+  ctx.beginPath();
+  ctx.ellipse(x, y, 30, 16, 0, 0, Math.PI * 2);
+  ctx.ellipse(x + 24, y + 4, 22, 13, 0, 0, Math.PI * 2);
+  ctx.ellipse(x - 24, y + 4, 22, 13, 0, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// человечек: голова + туловище + руки/ноги, с простой анимацией ходьбы/прыжка
+function drawHuman(x, y, shirtColor, name, atFinish, facing, walking, onGround, isMe) {
+  const cx = x + PLAYER_W / 2;
+  const skin = "#f2c79c";
+  const legSwing = onGround && walking ? Math.sin(walkPhase) * 10 : 0;
+
+  ctx.save();
+  ctx.translate(cx, y);
+  if (facing < 0) ctx.scale(-1, 1);
+
+  // ноги
+  ctx.strokeStyle = "#33384a";
+  ctx.lineWidth = 5;
+  ctx.lineCap = "round";
+  if (onGround) {
+    ctx.beginPath();
+    ctx.moveTo(-5, 26); ctx.lineTo(-5 + legSwing * 0.3, 41);
+    ctx.moveTo(5, 26); ctx.lineTo(5 - legSwing * 0.3, 41);
+    ctx.stroke();
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(-5, 26); ctx.lineTo(-9, 38);
+    ctx.moveTo(5, 26); ctx.lineTo(9, 38);
+    ctx.stroke();
+  }
+
+  // туловище
+  ctx.fillStyle = shirtColor;
+  ctx.beginPath();
+  ctx.roundRect ? ctx.roundRect(-9, 4, 18, 24, 4) : ctx.rect(-9, 4, 18, 24);
+  ctx.fill();
+
+  // руки
+  ctx.strokeStyle = shirtColor;
+  ctx.lineWidth = 5;
+  if (onGround) {
+    ctx.beginPath();
+    ctx.moveTo(-8, 8); ctx.lineTo(-8 - legSwing * 0.3, 22);
+    ctx.moveTo(8, 8); ctx.lineTo(8 + legSwing * 0.3, 22);
+    ctx.stroke();
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(-8, 8); ctx.lineTo(-14, -2);
+    ctx.moveTo(8, 8); ctx.lineTo(14, -2);
+    ctx.stroke();
+  }
+
+  // голова
+  ctx.fillStyle = skin;
+  ctx.beginPath();
+  ctx.arc(0, -8, 10, 0, Math.PI * 2);
+  ctx.fill();
+
+  // глаза (смотрят по направлению взгляда)
+  ctx.fillStyle = "#1b1f2a";
+  ctx.beginPath();
+  ctx.arc(4, -9, 1.6, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+
   if (atFinish) {
     ctx.strokeStyle = "#5dff8a";
     ctx.lineWidth = 2;
-    ctx.strokeRect(x - 2, y - 2, PLAYER_W + 4, PLAYER_H + 4);
+    ctx.strokeRect(x - 4, y - 22, PLAYER_W + 8, PLAYER_H + 26);
   }
+
   ctx.fillStyle = "#eef0f5";
   ctx.font = "12px sans-serif";
   ctx.textAlign = "center";
-  ctx.fillText(name + (isMe ? " (вы)" : ""), x + PLAYER_W / 2, y - 8);
+  ctx.fillText(name + (isMe ? " (вы)" : ""), cx, y - 24);
   ctx.textAlign = "left";
 }
 
@@ -292,6 +478,44 @@ function drawHint(text) {
   ctx.fillText("🤖 " + text, canvas.width / 2, 14 + 24);
   ctx.textAlign = "left";
   ctx.restore();
+}
+
+// ---------- конфетти на победу ----------
+function spawnConfetti() {
+  confetti.length = 0;
+  const colors = ["#ff5d5d", "#5da9ff", "#5dff8a", "#ffd25d", "#fff"];
+  for (let i = 0; i < 120; i++) {
+    confetti.push({
+      x: Math.random() * canvas.width,
+      y: -20 - Math.random() * canvas.height * 0.5,
+      vx: (Math.random() - 0.5) * 80,
+      vy: 120 + Math.random() * 180,
+      size: 4 + Math.random() * 5,
+      color: colors[i % colors.length],
+      rot: Math.random() * Math.PI,
+      vrot: (Math.random() - 0.5) * 6,
+    });
+  }
+}
+
+function updateConfetti(dt) {
+  for (const c of confetti) {
+    c.x += c.vx * dt;
+    c.y += c.vy * dt;
+    c.rot += c.vrot * dt;
+  }
+}
+
+function drawConfetti() {
+  for (const c of confetti) {
+    if (c.y > canvas.height + 20) continue;
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.rotate(c.rot);
+    ctx.fillStyle = c.color;
+    ctx.fillRect(-c.size / 2, -c.size / 2, c.size, c.size);
+    ctx.restore();
+  }
 }
 
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
