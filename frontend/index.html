@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Кооп-платформер</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: #1b1f2a;
+    color: #eef0f5;
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+  }
+  h1 { margin: 16px 0 4px; font-size: 22px; }
+  #sub { color: #9aa2b8; font-size: 13px; margin-bottom: 12px; }
+  #lobby {
+    background: #262b3a;
+    padding: 20px 28px;
+    border-radius: 12px;
+    text-align: center;
+    margin-bottom: 16px;
+  }
+  #lobby input {
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid #3a4156;
+    background: #1b1f2a;
+    color: #eef0f5;
+    font-size: 14px;
+    margin-right: 8px;
+  }
+  #lobby button {
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: none;
+    background: #5da9ff;
+    color: #0b1220;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  #lobby button:hover { background: #7cbcff; }
+  #status { margin-top: 8px; font-size: 13px; color: #9aa2b8; min-height: 16px; }
+  canvas {
+    background: linear-gradient(#2b3550, #1b1f2a);
+    border: 2px solid #3a4156;
+    border-radius: 8px;
+    display: none;
+  }
+  #hud {
+    display: none;
+    margin-top: 8px;
+    font-size: 13px;
+    color: #9aa2b8;
+  }
+  #controls {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #6c7388;
+    max-width: 760px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+  <h1>Кооп-платформер</h1>
+  <div id="sub">До 4 игроков, общая цель — добраться до финиша вместе</div>
+
+  <div id="lobby">
+    <input id="nameInput" type="text" placeholder="Ваше имя" maxlength="16">
+    <button id="joinBtn">Войти в игру</button>
+    <div id="status"></div>
+  </div>
+
+  <canvas id="game" width="960" height="540"></canvas>
+  <div id="hud"></div>
+  <div id="controls">
+    Управление: A/D или ←/→ — движение, W / ↑ / Пробел — прыжок.
+    Игра кооперативная: добраться до флага должны все игроки одновременно.
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
